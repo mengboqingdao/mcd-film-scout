@@ -4,6 +4,10 @@
 > 基于麦当劳中国官方 MCP Server（`https://mcp.mcd.cn`）开发，
 > 在 WorkBuddy 中以 Skill 形式运行。
 
+![演示](docs/demo.gif)
+
+*从「我想拍个麦当劳活动」到一份完整场记板，全程一次对话。*
+
 ---
 
 ## 它解决什么问题
@@ -115,6 +119,9 @@ mcd-film-scout/
 ├─ workbuddy.md                 WorkBuddy 开发对话上下文
 ├─ LICENSE                      MIT
 ├─ .gitignore
+├─ docs/
+│  ├─ demo.gif                 一分钟演示动画（README 首屏）
+│  └─ hero.png                 演示末帧静态图
 └─ src/
    ├─ mcd_client.py             麦当劳 MCP 客户端封装（含工具白名单）
    ├─ film_scout.py             场记板核心：活动→场次→拍摄预案
