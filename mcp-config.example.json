@@ -1,0 +1,12 @@
+{
+  "_说明": "麦当劳 MCP Server 接入示例。复制后请把 YOUR_MCP_TOKEN 替换为你自己在 https://open.mcd.cn/mcp 申请的 Token。本文件不含任何真实凭证。",
+  "mcpServers": {
+    "mcd-mcp": {
+      "type": "streamablehttp",
+      "url": "https://mcp.mcd.cn",
+      "headers": {
+        "Authorization": "Bearer YOUR_MCP_TOKEN"
+      }
+    }
+  }
+}
