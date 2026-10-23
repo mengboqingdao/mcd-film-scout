@@ -61,9 +61,31 @@
 
 ## 快速开始
 
+### 0. 先跑起来看看（不需要 Token，30 秒）
+
+```bash
+git clone https://github.com/mengboqingdao/mcd-film-scout.git
+cd mcd-film-scout
+python3 src/film_scout.py --demo --city 青岛
+```
+
+零依赖、零配置、零 Token，直接输出一份完整场记板。
+（`--demo` 用的是**样例数据**，输出里会明确标注；真实数据见下面第 1 步。）
+
+输出长这样：
+
+![场记板输出](docs/output.png)
+
 ### 1. 申请 MCP Token
 
 访问 <https://open.mcd.cn/mcp> → 右上角【登录】（手机号验证）→ 【控制台】→【激活】→ 同意服务协议 → 复制 Token。
+
+拿到后：
+
+```bash
+export MCD_MCP_TOKEN="你的Token"
+python3 src/film_scout.py --city 青岛 --store "你的门店名"
+```
 
 ### 2. 配置 MCP
 
@@ -121,9 +143,11 @@ mcd-film-scout/
 ├─ .gitignore
 ├─ docs/
 │  ├─ demo.gif                 一分钟演示动画（README 首屏）
-│  └─ hero.png                 演示末帧静态图
+│  ├─ hero.png                 演示末帧静态图
+│  └─ output.png               场记板输出样张
 └─ src/
    ├─ mcd_client.py             麦当劳 MCP 客户端封装（含工具白名单）
+   ├─ demo_client.py           离线演示客户端（样例数据，无需 Token）
    ├─ film_scout.py             场记板核心：活动→场次→拍摄预案
    └─ skill/
       ├─ SKILL.md               WorkBuddy Skill 定义
