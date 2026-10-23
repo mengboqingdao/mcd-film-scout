@@ -13,6 +13,7 @@ mcd-film-scout · 麦当劳 MCP 客户端
 """
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional
@@ -21,15 +22,21 @@ MCP_ENDPOINT = os.environ.get("MCD_MCP_URL", "https://mcp.mcd.cn")
 TOKEN_ENV = "MCD_MCP_TOKEN"
 
 # 本项目实际调用的工具白名单
+# ★ 名称与参数均以 MCP Server 1.0.9 的 tools/list 实际返回为准
 TOOL_WHITELIST = (
-    "campaign-calendar",        # 活动日历：查当月营销活动
-    "now-time-info",            # 当前时间：判断活动是否在进行中
-    "query-nearby-stores",      # 附近门店：找可用的麦当劳门店
-    "query-meals",              # 当前门店可售餐品
-    "list-nutrition-foods",     # 餐品营养成分
-    "query-store-coupons",      # 门店可用优惠券
-    "available-coupons",        # 可领取的麦麦省券
-    "query-my-account",         # 积分账户
+    "campaign-calendar",          # 活动日历：查当月营销活动
+    "now-time-info",              # 当前时间：判断活动是否在进行中
+    "mall-points-products",       # 积分商城商品：主题活动 spuId 的来源
+    "query-party-city",           # 主题活动可参与城市（需 spuId）
+    "query-party-store",          # 主题活动门店（需城市 code + spuId）
+    "query-party-store-date",     # 门店可约日期（需 spuId + storeCode）
+    "query-party-store-session",  # 指定日期可约场次（需 spuId + storeCode + dateStr）
+    "query-nearby-stores",        # 附近门店（需 beType + searchType）
+    "query-meals",                # 当前门店在售餐品（需 storeCode + orderType + beType）
+    "list-nutrition-foods",       # 餐品营养成分
+    "query-store-coupons",        # 门店可用优惠券（需 storeCode + orderType + beType）
+    "available-coupons",          # 可领取的麦麦省券
+    "query-my-account",           # 积分账户
 )
 
 
@@ -126,7 +133,14 @@ class McdClient:
         return self._tools
 
     def call(self, tool: str, args: Optional[Dict[str, Any]] = None) -> Any:
-        """调用一个工具。tool 必须在白名单内。"""
+        """调用一个工具。tool 必须在白名单内。
+
+        ★ MCP Server 1.0.9 的返回有两种形态：
+          ① 纯 JSON 字符串
+          ② 「字段说明 + ## Original Response + JSON」的 Markdown 文本
+          （例如 campaign-calendar、available-coupons、list-nutrition-foods）
+        这里统一把 ② 里的 JSON 抽出来，解析失败时原样返回文本。
+        """
         if tool not in TOOL_WHITELIST:
             raise McdMcpError(f"工具 {tool} 不在本项目白名单内，拒绝调用。")
         if self._tools is None:
@@ -141,7 +155,91 @@ class McdClient:
         if not texts:
             return res
         raw = "\n".join(texts)
+        return parse_tool_output(raw)
+
+
+# ── 返回值解析 ────────────────────────────────────────────────────
+_ORIGINAL_RE = re.compile(r"##\s*Original Response\s*\n+(.*)", re.S)
+_JSON_BLOCK_RE = re.compile(r"```(?:json)?\s*\n+(.*?)```", re.S)
+
+
+def parse_tool_output(raw: str) -> Any:
+    """从 MCP 工具返回文本中抽出结构化数据。
+
+    优先找 `## Original Response` 后面的 JSON；
+    找不到就找整段文本里的第一个 JSON 对象/数组；
+    都没有则原样返回文本。
+    """
+    if not isinstance(raw, str):
+        return raw
+
+    candidates: List[str] = []
+    m = _ORIGINAL_RE.search(raw)
+    if m:
+        candidates.append(m.group(1).strip())
+    m2 = _JSON_BLOCK_RE.search(raw)
+    if m2:
+        candidates.append(m2.group(1).strip())
+    candidates.append(raw.strip())
+
+    for c in candidates:
+        if not c:
+            continue
         try:
-            return json.loads(raw)
+            obj = json.loads(c)
         except json.JSONDecodeError:
-            return raw
+            continue
+        # obj 解析成功，但 data 可能还是字符串（两种情况）
+        inner = obj.get("data") if isinstance(obj, dict) else None
+        if isinstance(inner, str):
+            try:
+                obj["data"] = json.loads(inner)
+                return obj
+            except json.JSONDecodeError:
+                # list-nutrition-foods 返回的是自定义文本格式：
+                #   [160]{productName,energyKcal,protein,...}:
+                #     猪柳麦满分,null,1288,308,16,...
+                parsed = parse_table_text(inner)
+                if parsed:
+                    obj["data"] = parsed
+                    return obj
+        return obj
+    return raw
+
+
+_TABLE_HEADER_RE = re.compile(r"^\[(\d+)\]\s*\{([^}]*)\}\s*:\s*$")
+
+
+def parse_table_text(text: str) -> List[Dict[str, Any]]:
+    """解析 MCP 的自定义表格文本格式。
+
+    形如：
+        [160]{productName,nutritionDescription,energyKcal,protein}:
+          猪柳麦满分,null,308,16
+          猪柳蛋麦满分,null,387,23
+    返回 [{'productName': '猪柳麦满分', 'energyKcal': '308', ...}, ...]
+    """
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    if not lines:
+        return []
+    m = _TABLE_HEADER_RE.match(lines[0].strip())
+    if not m:
+        return []
+    cols = [c.strip() for c in m.group(2).split(",")]
+    rows: List[Dict[str, Any]] = []
+    for ln in lines[1:]:
+        parts = [p.strip() for p in ln.strip().split(",")]
+        if len(parts) < len(cols):
+            parts += [""] * (len(cols) - len(parts))
+        row: Dict[str, Any] = {}
+        for i, c in enumerate(cols):
+            v = parts[i]
+            if v in ("null", "None", ""):
+                row[c] = None
+            else:
+                try:
+                    row[c] = float(v) if re.fullmatch(r"-?\d+(\.\d+)?", v) else v
+                except ValueError:
+                    row[c] = v
+        rows.append(row)
+    return rows
