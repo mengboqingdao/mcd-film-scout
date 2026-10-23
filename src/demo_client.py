@@ -11,6 +11,11 @@ demo_client.py · 离线演示模式
   这与项目「宁可空手，也不编造」的原则不冲突——
   因为它压根不假装那是真的。
 
+★ 样例数据的结构严格照抄真实 MCP 返回的字段名（spuId / code /
+  storeCode / timeStart / leftNum / categories[].meals[] 等），
+  这样演示模式走的是和真实模式**同一条代码路径**，
+  不会出现「演示能跑、真实跑不通」的假通过。
+
 作者：孟波（mengboqingdao）  |  用 WorkBuddy 开发
 """
 from typing import Any, Dict, List
@@ -18,6 +23,7 @@ from mcd_client import McdClient, McdMcpError, TOOL_WHITELIST
 
 
 # ── 演示用的样例数据（全部标注为样例） ──────────────────────────
+# 活动日历
 _DEMO_CALENDAR = {
     "code": 0,
     "data": {
@@ -29,76 +35,132 @@ _DEMO_CALENDAR = {
     },
 }
 
+# 主题活动的 spuId（query-party-city / -store / -date 的必填参数来源）
+_DEMO_PRODUCTS = {
+    "code": 0,
+    "data": {
+        "list": [
+            {"spuId": 1779, "spuName": "麦麦生日派对"},
+            {"spuId": 1830, "spuName": "亲子读书会"},
+        ]
+    },
+}
+
+# 可参与城市
 _DEMO_CITIES = {
     "code": 0,
     "data": {"list": [
-        {"cityName": "青岛"}, {"cityName": "北京"}, {"cityName": "上海"},
-        {"cityName": "杭州"}, {"cityName": "成都"},
+        {"code": "370200", "name": "青岛"},
+        {"code": "110100", "name": "北京"},
+        {"code": "310100", "name": "上海"},
+        {"code": "330100", "name": "杭州"},
+        {"code": "510100", "name": "成都"},
     ]},
 }
 
+# 参与门店
 _DEMO_STORES = {
     "code": 0,
     "data": {"list": [
-        {"storeName": "崂山金家岭店"},
-        {"storeName": "市南香港中路店"},
-        {"storeName": "李沧万达店"},
+        {"code": "3350001", "name": "佳世客餐厅", "distanceText": "1.2km"},
+        {"code": "3350002", "name": "香港中路餐厅", "distanceText": "3.4km"},
+        {"code": "3350003", "name": "李沧万达餐厅", "distanceText": "8.6km"},
     ]},
 }
 
+# 可约日期
+_DEMO_DATES = {
+    "code": 0,
+    "data": {"list": [
+        {"date": "2026-10-26"}, {"date": "2026-10-27"}, {"date": "2026-10-28"},
+        {"date": "2026-10-29"}, {"date": "2026-10-30"}, {"date": "2026-10-31"},
+        {"date": "2026-11-01"},
+    ]},
+}
+
+# 场次与余位
 _DEMO_SESSIONS = {
     "code": 0,
     "data": {"list": [
-        {"sessionTime": "19:00-20:30", "remainNum": 6},
-        {"sessionTime": "20:30-22:00", "remainNum": 2},
+        {"timeStart": "12:00", "timeEnd": "13:30", "leftNum": 12},
+        {"timeStart": "18:30", "timeEnd": "20:00", "leftNum": 12},
     ]},
 }
 
+# 菜单：真实结构是 data.categories[].meals[]，且 meals 里只有 code 与 tags
 _DEMO_MEALS = {
     "code": 0,
-    "data": {"list": [
-        {"mealName": "麦麦月圆套餐", "price": 39.0},
-        {"mealName": "月圆主题双人餐", "price": 68.0},
-        {"mealName": "热拿铁（中）", "price": 18.0},
-        {"mealName": "黄金薯条（中）", "price": 11.0},
-        {"mealName": "鸡翅包饭", "price": 24.0},
+    "data": {"categories": [
+        {"name": "人气热卖", "meals": [
+            {"code": "m1001", "tags": ["心形薯饼同款比心"]},
+            {"code": "m1002", "tags": ["黄金薯条"]},
+        ]},
+        {"name": "鸡肉汉堡/卷", "meals": [
+            {"code": "m2001", "tags": ["麦辣鸡腿堡"]},
+            {"code": "m2002", "tags": ["板烧鸡腿堡"]},
+        ]},
+        {"name": "咖啡与饮品", "meals": [
+            {"code": "m3001", "tags": ["热拿铁"]},
+            {"code": "m3002", "tags": ["可口可乐"]},
+            {"code": "m3003", "tags": ["橙汁"]},
+        ]},
+        {"name": "甜品", "meals": [
+            {"code": "m4001", "tags": ["蛋挞"]},
+            {"code": "m4002", "tags": ["甜筒"]},
+            {"code": "m4003", "tags": ["红豆派"]},
+        ]},
+        {"name": "主食", "meals": [
+            {"code": "m5001", "tags": ["鸡翅包饭"]},
+            {"code": "m5002", "tags": ["麦麦月圆套餐"]},
+        ]},
     ]},
 }
 
+# 营养：真实结构是扁平列表，字段名为 productName / energyKcal / protein
 _DEMO_NUTRITION = {
     "code": 0,
     "data": {"list": [
-        {"name": "麦麦月圆套餐", "calories": 780, "protein": 32},
-        {"name": "热拿铁（中）", "calories": 145, "protein": 6},
-        {"name": "鸡翅包饭", "calories": 520, "protein": 24},
-        {"name": "黄金薯条（中）", "calories": 330, "protein": 4},
+        {"productName": "麦麦月圆套餐", "energyKcal": 780, "protein": 32},
+        {"productName": "热拿铁（中）", "energyKcal": 145, "protein": 6},
+        {"productName": "鸡翅包饭", "energyKcal": 520, "protein": 24},
+        {"productName": "黄金薯条（中）", "energyKcal": 330, "protein": 4},
+        {"productName": "蛋挞", "energyKcal": 190, "protein": 3},
     ]},
 }
 
+# 券
 _DEMO_COUPONS = {
     "code": 0,
     "data": {"list": [
-        {"couponName": "第二份半价券", "amount": 5.0},
-        {"couponName": "满50减12券", "amount": 12.0},
-        {"couponName": "9元咖啡券", "amount": 9.0},
+        {"couponName": "第二份半价券"},
+        {"couponName": "满50减12券"},
+        {"couponName": "9元咖啡券"},
     ]},
 }
 
-_DEMO_NEARBY = _DEMO_STORES
+_DEMO_EMPTY = {"code": 0, "data": {"list": []}}
 
+# 工具名 → 样例数据
+# ★ 注意：既登记真实工具名（query-party-store-date），
+#   也登记旧文档里的错误写法（query-partystore-date），
+#   万一有人照旧文档改了代码，演示模式也不至于直接崩。
 _DEMO_MAP = {
     "campaign-calendar": _DEMO_CALENDAR,
+    "now-time-info": {"code": 0, "data": {"currentTime": "2026-10-23 10:50:00"}},
+    "mall-points-products": _DEMO_PRODUCTS,
     "query-party-city": _DEMO_CITIES,
     "query-party-store": _DEMO_STORES,
-    "query-partystore-date": _DEMO_SESSIONS,
+    "query-party-store-date": _DEMO_DATES,
+    "query-party-store-session": _DEMO_SESSIONS,
+    "query-partystore-date": _DEMO_DATES,
     "query-partystore-session": _DEMO_SESSIONS,
-    "query-nearby-stores": _DEMO_NEARBY,
+    "query-nearby-stores": _DEMO_STORES,
     "query-meals": _DEMO_MEALS,
     "query-meal-detail": _DEMO_MEALS,
     "list-nutrition-foods": _DEMO_NUTRITION,
     "query-store-coupons": _DEMO_COUPONS,
     "available-coupons": _DEMO_COUPONS,
-    "query-meal-assistance": {"code": 0, "data": {"list": []}},
+    "query-meal-assistance": _DEMO_EMPTY,
 }
 
 
