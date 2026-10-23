@@ -13,3 +13,4 @@ venv/
 # 本地产出
 out/
 *.log
+.env.local
