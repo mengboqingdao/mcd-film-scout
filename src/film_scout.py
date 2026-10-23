@@ -128,7 +128,11 @@ def pick(d: Dict[str, Any], *names: str) -> Optional[Any]:
 
 
 def extract_items(raw: Any) -> List[Dict[str, Any]]:
-    """从 MCP 返回里抽出「记录列表」。取最长的那个数组作为主列表。"""
+    """从 MCP 返回里抽出「记录列表」。取最长的那个数组作为主列表。
+
+    ★ 注意：list-nutrition-foods 的 data 是已解析好的 dict 列表（由
+      mcd_client.parse_tool_output 处理自定义文本格式），所以这里够用。
+    """
     best: List[Any] = []
     for d in _walk(raw):
         for v in d.values():
@@ -136,6 +140,50 @@ def extract_items(raw: Any) -> List[Dict[str, Any]]:
                 if any(isinstance(x, dict) for x in v):
                     best = v
     return [x for x in best if isinstance(x, dict)]
+
+
+def extract_meal_labels(raw: Any) -> List[str]:
+    """从 query-meals 返回里抽出「分类 + 标签」形式的可读菜单。
+
+    ★ 真实返回结构：data.categories[].meals[]，每项只有 code 和 tags，
+      没有餐品名称（名称要再查 query-meal-detail）。
+      这里不做无谓的逐条详情请求——分类名 + 标签本身就是有用的画面信息，
+      例如「人气热卖 · 心形薯饼同款比心」。
+    """
+    out: List[str] = []
+    cats = []
+    for d in _walk(raw):
+        if isinstance(d.get("categories"), list):
+            cats = d["categories"]
+            break
+    for cat in cats:
+        if not isinstance(cat, dict):
+            continue
+        # 分类名里可能含斜杠或换行（如「鸡肉汉堡\n/卷」），
+        # 会把 Markdown 列表割断 —— 统一压成「·」
+        cname = re.sub(r"[\s/／]+", "·", str(cat.get("name") or "").strip()).strip("·")
+        meals = cat.get("meals") or []
+        for m in meals:
+            if not isinstance(m, dict):
+                continue
+            name = re.sub(r"[\s/／]+", "·", str(m.get("name") or m.get("mealName") or "").strip())
+            if name:
+                out.append(name)
+                continue
+            tags = [re.sub(r"[\s/／]+", "·", str(t).strip())
+                    for t in (m.get("tags") or []) if str(t).strip()]
+            if cname and tags:
+                out.append(f"{cname} · {tags[0]}")
+            elif cname:
+                out.append(cname)
+    # 去重保序
+    seen = set()
+    uniq = []
+    for x in out:
+        if x not in seen:
+            seen.add(x)
+            uniq.append(x)
+    return uniq
 
 
 def extract_names(raw: Any, *keys: str) -> List[str]:
@@ -249,11 +297,17 @@ def build_plan(activity_name: str, meals: List[str],
         plan.light = list(LIGHT_DEFAULT)
 
     # 色彩：从餐品名里找颜色词
+    # ★ 同一颜色词可能出现在多个餐品上（例如多个分类都叫「黄金薯条」），
+    #   这里给每个颜色词挑一个「还没被用过的」餐品，避免输出里全是同一款。
     seen = set()
+    used_meals = set()
     for m in meals:
         for word, advice in COLOR_WORDS.items():
             if word in m and word not in seen:
                 seen.add(word)
+                if m in used_meals:
+                    continue
+                used_meals.add(m)
                 plan.color.append(f"{advice}（对应「{m}」）")
     if not plan.color:
         plan.color = [
@@ -285,8 +339,8 @@ def nutrition_advice(nutrition_raw: Any, minutes: int = 120) -> List[str]:
     items = extract_items(nutrition_raw)
     out = []
     for d in items:
-        name = pick(d, "name", "foodName", "餐品名称", "title")
-        kcal = pick(d, "energy", "calories", "kcal", "热量", "energyKcal")
+        name = pick(d, "productName", "name", "foodName", "餐品名称", "title")
+        kcal = pick(d, "energyKcal", "calories", "kcal", "energy", "热量", "energyKj")
         protein = pick(d, "protein", "蛋白质")
         if not name:
             continue
@@ -302,7 +356,7 @@ def nutrition_advice(nutrition_raw: Any, minutes: int = 120) -> List[str]:
             tip = "主食档，能量够撑住一段连续拍摄"
         else:
             tip = "重档，吃完会有明显的倦意，重要场次慎选"
-        extra = f"，蛋白质 {protein}g" if protein is not None else ""
+        extra = f"，蛋白质 {int(protein)}g" if protein is not None else ""
         out.append(f"{name}：约 {int(k)} 千卡{extra} —— {tip}")
     if not out:
         out = ["营养数据暂不可用，出门前先吃点东西，拍摄间隙别硬撑"]
@@ -348,47 +402,127 @@ def scout(city: str, client: Optional[McdClient] = None,
     except McdMcpError as e:
         note.warnings.append(f"活动日历查询失败：{e}")
 
-    # 2) 主题活动可参与城市
+    # 1.5) 取主题活动的 spuId（query-party-city 必填）
+    spu_id: Optional[int] = None
+    spu_name = ""
     try:
-        cities = client.call("query-party-city", {})
-        used.append("query-party-city")
-        cs = extract_names(cities, "cityName", "name", "城市名称", "city")
-        if cs:
-            note.warnings.append(
-                f"主题活动可参与城市（{len(cs)} 个）：" + "、".join(cs[:12])
-                + ("　※ 你所在的 " + city + (" 在其中。" if city in cs else " 不在其中。"))
-            )
+        prods = client.call("mall-points-products", {})
+        used.append("mall-points-products")
+        prods = extract_items(prods)
+        # 优先选「派对」类（更适合拍摄），否则取第一个在售
+        cands = [p for p in prods if pick(p, "spuName", "name", "title")]
+        party = [p for p in cands if "派对" in str(pick(p, "spuName", "name", "title", ""))]
+        pick_one = (party or cands)
+        if pick_one:
+            spu_id = pick(pick_one[0], "spuId", "id")
+            spu_name = str(pick(pick_one[0], "spuName", "name", "title", ""))
+            note.activity = spu_name or note.activity
+    except McdMcpError as e:
+        note.warnings.append(f"主题活动列表获取失败：{e}")
+
+    # 2) 主题活动可参与城市（需 spuId）
+    city_code = ""
+    try:
+        if spu_id:
+            cities = client.call("query-party-city", {"spuId": spu_id})
+            used.append("query-party-city")
+            cl = extract_items(cities)
+            hit = None
+            for c in cl:
+                nm = str(pick(c, "name", "cityName", "城市名称", ""))
+                if nm.startswith(city) or city in nm:
+                    hit = c
+                    break
+            if hit:
+                city_code = str(pick(hit, "code", "cityCode", ""))
+                note.warnings.append(
+                    f"「{spu_name}」可参与城市 {len(cl)} 个；"
+                    f"你所在的 {city} 在其中（code={city_code}）。"
+                )
+            else:
+                note.warnings.append(
+                    f"「{spu_name}」可参与城市 {len(cl)} 个，"
+                    f"但 {city} 不在其中——建议改拍普通门店。"
+                )
     except McdMcpError as e:
         note.warnings.append(f"主题活动城市查询失败：{e}")
 
-    # 3) 门店
+    # 3) 门店（需 城市code + spuId）
+    store_code = ""
     try:
-        if store_hint:
-            stores = client.call("query-party-store", {"cityName": city})
+        if city_code and spu_id:
+            stores = client.call("query-party-store", {"code": city_code, "spuId": spu_id})
             used.append("query-party-store")
-            sn = extract_names(stores, "storeName", "name", "门店名称", "store")
-            if sn:
-                note.store = sn[0]
-        else:
-            near = client.call("query-nearby-stores", {"latitude": "", "longitude": ""})
-            used.append("query-nearby-stores")
-            nn = extract_names(near, "storeName", "name", "门店名称")
-            if nn:
-                note.store = nn[0]
+            sl = extract_items(stores)
+            hit = None
+            for s in sl:
+                nm = str(pick(s, "name", "storeName", "shortName", "门店名称", ""))
+                if store_hint and store_hint in nm:
+                    hit = s
+                    break
+            if hit is None and sl:
+                hit = sl[0]
+            if hit:
+                note.store = str(pick(hit, "name", "storeName", "shortName", "门店名称", ""))
+                store_code = str(pick(hit, "code", "storeCode", ""))
+                addr = pick(hit, "address", "地址", "")
+                dist = pick(hit, "distanceText", "distance", "")
+                extra = "　".join(x for x in [str(addr) if addr else "",
+                                             str(dist) if dist else ""] if x)
+                note.warnings.append(
+                    f"{city} 有 {len(sl)} 家参与门店。"
+                    + (f"选定：{note.store}（{extra}）" if extra else f"选定：{note.store}")
+                )
     except McdMcpError as e:
         note.warnings.append(f"门店查询失败：{e}")
 
-    # 4) 菜单与餐品
-    meals: List[str] = []
-    try:
-        m = client.call("query-meals", {})
-        used.append("query-meals")
-        meals = extract_names(m, "mealName", "name", "餐品名称", "productName")
-        note.meals = meals[:12]
-    except McdMcpError as e:
-        note.warnings.append(f"菜单查询失败：{e}")
+    # 4) 档期（需 spuId + storeCode）
+    if spu_id and store_code:
+        try:
+            dates = client.call("query-party-store-date",
+                                {"spuId": spu_id, "storeCode": store_code})
+            used.append("query-party-store-date")
+            dl = extract_items(dates)
+            note.dates = [str(pick(d, "date", "日期", "")) for d in dl][:7]
+            if note.dates:
+                try:
+                    sess = client.call("query-party-store-session", {
+                        "spuId": spu_id, "storeCode": store_code,
+                        "dateStr": note.dates[0]})
+                    used.append("query-party-store-session")
+                    sl2 = extract_items(sess)
+                    note.sessions = [
+                        f"{pick(x,'timeStart','开始','startTime','')}-"
+                        f"{pick(x,'timeEnd','结束','endTime','')}"
+                        f"（余位 {pick(x,'leftNum','余位','remain','0')}）"
+                        for x in sl2][:6]
+                except McdMcpError as e:
+                    note.warnings.append(f"场次查询失败：{e}")
+        except McdMcpError as e:
+            note.warnings.append(f"档期查询失败：{e}")
 
-    # 5) 营养
+    # 5) 菜单与餐品（需 storeCode）
+    meals: List[str] = []
+    if store_code:
+        try:
+            m = client.call("query-meals",
+                            {"storeCode": store_code, "orderType": 1, "beType": 1})
+            used.append("query-meals")
+            meals = extract_meal_labels(m)
+            note.meals = meals[:12]
+        except McdMcpError as e:
+            note.warnings.append(f"菜单查询失败：{e}")
+    else:
+        try:
+            m = client.call("query-meals",
+                            {"storeCode": "3350001", "orderType": 1, "beType": 1})
+            used.append("query-meals")
+            meals = extract_meal_labels(m)
+            note.meals = meals[:12]
+        except McdMcpError as e:
+            note.warnings.append(f"菜单查询失败：{e}")
+
+    # 6) 营养
     try:
         n = client.call("list-nutrition-foods", {})
         used.append("list-nutrition-foods")
@@ -396,7 +530,7 @@ def scout(city: str, client: Optional[McdClient] = None,
     except McdMcpError as e:
         note.nutrition = ["营养数据暂不可用"]
 
-    # 6) 券
+    # 7) 券
     try:
         c = client.call("available-coupons", {})
         used.append("available-coupons")
@@ -405,14 +539,15 @@ def scout(city: str, client: Optional[McdClient] = None,
     except McdMcpError as e:
         note.warnings.append(f"优惠券查询失败：{e}")
 
-    # 7) 生成拍摄预案
+    # 8) 生成拍摄预案
     note.plan = build_plan(note.activity, note.meals, used)
 
     note.tools_used = used
     if not note.dates and not note.sessions:
         note.warnings.append(
             "档期（可约日期与场次）需要具体门店后再查："
-            "在对话里指定门店名，我会接着调 query-partystore-date 与 query-partystore-session。"
+            "在对话里指定门店名，我会接着调 query-party-store-date 与 "
+            "query-party-store-session。"
         )
     return note
 
@@ -423,13 +558,21 @@ def main() -> None:
     ap.add_argument("--city", default="青岛", help="城市名")
     ap.add_argument("--store", default="", help="指定门店名（指定后才会查档期）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--demo", action="store_true",
+                    help="离线演示模式：用样例数据跑一遍，不联网、不需要 Token")
     args = ap.parse_args()
 
-    try:
-        client = McdClient()
-    except McdMcpError as e:
-        print(f"[离线模式] {e}\n", file=sys.stderr)
-        client = None
+    if args.demo:
+        from demo_client import DemoClient
+        client = DemoClient(city=args.city)
+        print("[演示模式] 以下内容为【样例数据】，用于展示输出格式；"
+              "真实数据需配置 MCD_MCP_TOKEN 后重新运行。\n", file=sys.stderr)
+    else:
+        try:
+            client = McdClient()
+        except McdMcpError as e:
+            print(f"[离线模式] {e}\n", file=sys.stderr)
+            client = None
 
     note = scout(args.city, client, args.store)
     if args.json:
